@@ -1,0 +1,352 @@
+/*
+* This code controls a 220v pedestial fan with an IR remote.
+* The fan's speed is regulated through relays, allowing for three-speed settings (low, medium, and high).
+* The system also allows for brightness control of an LCD screen using a remote, along with a sleep mode and scheduled fan operation.
+* The remote control buttons send hexadecimal values to trigger actions in the code.
+* Replace the hexadecimal values (e.g., 0xF30CFF00) with those specific to your remote control.
+* The prototype, including the setup and connections, is explained in the accompanying YouTube video.
+* Watch the video here:                       for a detailed walkthrough.
+* Refer to the connection diagram for the wiring setup of the relays, LCD, and IR receiver.
+* This code was prepared by Jaydeep Gupta for JG Projects. Permission is granted to share this code, provided this comment block remains intact.
+*/
+#include <IRremote.hpp>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>  // Include the I2C library for LCD
+
+// I2C address for the LCD (typically 0x27 or 0x3F)
+LiquidCrystal_I2C lcd(0x27, 16, 2); // Adjust address if necessary
+
+int IRPin = 2; // IR receiver connected to D2 Pin
+
+// Relays for speed control
+int relayPinLow = 3;    // Relay connected to D3 Pin (controls low speed)
+int relayPinMedium = 4; // Relay connected to D4 Pin (controls medium speed)
+int relayPinHigh = 5;   // Relay connected to D5 Pin (controls high speed)
+
+const int backlightPin = 9; // PWM-capable pin
+int currentBrightness = 255;  // Initialize brightness at max (255)
+unsigned long brightnessDisplayStartTime = 0;  // Variable to store when brightness was last updated
+bool brightnessDisplayed = false;  // Flag to track whether brightness is currently displayed
+unsigned long fanSchedule = 0;  // Time for which fan is scheduled to run (in milliseconds)
+unsigned long fanStartTime = 0; // Time when the fan was started (in milliseconds)
+unsigned long lastUpdateTime = 0; // Last time the timer was updated
+
+bool powerButtonPressed = false;
+bool fanRunning = false;
+int currentSpeed = 0;  // 0 = Off, 1 = Low, 2 = Medium, 3 = High
+
+// Variables for scrolling text
+const int maxMessageLength = 35;  // Adjust this to fit your needs
+char currentMessage[maxMessageLength];
+unsigned long lastScrollTime = 0;
+int scrollIndex = 0;
+
+// Debounce variables
+unsigned long lastButtonPressTime = 0;
+const unsigned long debounceDelay = 300; // Adjust debounce delay (in milliseconds)
+
+// Non-blocking timing variables
+unsigned long lastIRCheckTime = 0;
+const unsigned long IRCheckInterval = 100; // Check for IR input every 100ms
+
+void setup() {
+  Serial.begin(9600);       // Setup Serial Monitor
+  IrReceiver.begin(IRPin, ENABLE_LED_FEEDBACK);  // Start the receiver
+  lcd.backlight(); // Turn on the backlight
+
+  // Initialize relay pins
+  pinMode(relayPinLow, OUTPUT);
+  pinMode(relayPinMedium, OUTPUT);
+  pinMode(relayPinHigh, OUTPUT);
+  pinMode(backlightPin, OUTPUT);// Ensure all speed relays are off initially
+  
+  digitalWrite(relayPinLow, HIGH);    
+  digitalWrite(relayPinMedium, HIGH); 
+  digitalWrite(relayPinHigh, HIGH);
+  analogWrite(backlightPin, 255);    
+
+  lcd.init();       // Initialize LCD
+  lcd.backlight();  // Turn on the LCD backlight
+
+  // Display the boot-up message
+  Serial.println("Press Pwr to turn ON.");
+  setScrollMessage("Press Pwr to turn ON.");
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+
+  // Periodic IR check to prevent overload
+  if (currentTime - lastIRCheckTime >= IRCheckInterval) {
+    handleIRInput();
+    lastIRCheckTime = currentTime;
+  }
+
+  // Handle scrolling text
+  updateScroll(currentTime);
+  
+   // Update brightness display if needed
+  updateBrightnessDisplay();
+  
+  // Check if it's time to stop the fan
+  if (fanRunning && fanSchedule > 0) {
+    unsigned long elapsedTime = currentTime - fanStartTime;
+    unsigned long remainingTime = fanSchedule - elapsedTime;
+
+    if (remainingTime <= 0) {
+      stopFan();
+    } else if (currentTime - lastUpdateTime >= 1000) { // Update every second
+      lastUpdateTime = currentTime;
+      displayRemainingTime(remainingTime);
+    }
+  }
+}
+
+void handleIRInput() {
+  if (IrReceiver.decode()) {
+    long rawData = IrReceiver.decodedIRData.decodedRawData;
+    unsigned long currentTime = millis();
+    
+    // Debounce logic
+    if (currentTime - lastButtonPressTime > debounceDelay) {
+      lastButtonPressTime = currentTime;
+      
+      // Handle the Power button
+      if (rawData == 0xBA45FF00) { // Power button
+        powerButtonPressed = !powerButtonPressed; // Toggle power button state
+        if (powerButtonPressed) {
+          setFanSpeed(1); // Start with low speed
+          fanRunning = true;
+          fanSchedule = 0;  // Clear any timer schedule
+        } else {
+          stopFan(); // Turn off the fan
+        }
+      }
+
+      // Handle other buttons only if power is on
+      if (powerButtonPressed) {
+        switch (rawData) {
+          case 0xBB44FF00: // Button Rewined pressed for low speed
+            setFanSpeed(1);
+            break;
+          case 0xBF40FF00: // Button Pause pressed for medium speed
+            setFanSpeed(2);
+            break;
+          case 0xBC43FF00: // Button fast fwd pressed for high speed
+            setFanSpeed(3);
+            break;
+          case 0xF30CFF00: // Button 1 pressed
+            scheduleFan(1);  // 1 hour
+          break;
+          case 0xE718FF00: // Button 2 pressed
+            scheduleFan(2);  // 2 hours
+          break;
+          case 0xA15EFF00: // Button 3 pressed
+            scheduleFan(3);  // 3 hours
+          break;
+          case 0xF708FF00: // Button 4 pressed
+            scheduleFan(4);  // 4 hours
+          break;
+          case 0xE31CFF00: // Button 5 pressed
+            scheduleFan(5);  // 5 hours
+          break;
+          case 0xA55AFF00: // Button 6 pressed
+            scheduleFan(6);  // 6 hours
+          break;
+          case 0xBD42FF00: // Button 7 pressed
+            scheduleFan(7);  // 7 hours
+          break;
+          case 0xAD52FF00: // Button 8 pressed
+            scheduleFan(8);  // 8 hours
+          break;
+          case 0xB54AFF00: // Button 9 pressed
+            scheduleFan(9);  // 9 hours
+          break;
+          case 0xF807FF00: // Down arrow
+            adjustBrightness(-20);
+            break;
+          case 0xF609FF00: // Up arrow
+            adjustBrightness(+20);
+            break;
+          default:
+            // Ignore unknown or random signals
+            break;
+        }
+      } else {
+        Serial.println("Fan OFF: Press -Pwr- to turn ON");
+        setScrollMessage("Fan OFF: Press -Pwr- to turn ON.");
+      }
+    }
+
+    IrReceiver.resume();  // Resume receiving the next IR signal
+  }
+}
+// Function to adjust brightness
+void adjustBrightness(int increment) {
+  currentBrightness += increment;  // Increase or decrease the brightness
+
+  // Ensure brightness is within the valid range (0 - 255)
+  if (currentBrightness > 255) {
+    currentBrightness = 255;
+  } else if (currentBrightness < 0) {
+    currentBrightness = 0;
+  }
+
+  // Apply the brightness change to the backlight
+  analogWrite(backlightPin, currentBrightness);
+
+  // Print current brightness for debugging
+  Serial.print("Brightness set to: ");
+  Serial.println(currentBrightness);
+
+  // Display brightness level ("B:F" or "B:L") on the LCD for 2 seconds
+  if (currentBrightness == 255) {
+    startBrightnessDisplay("B:F");
+  } else if (currentBrightness == 0) {
+    startBrightnessDisplay("B:L");
+  }
+}
+// Function to start displaying brightness level temporarily
+void startBrightnessDisplay(const char* brightnessLevel) {
+  lcd.setCursor(13, 1);  // Set cursor to the rightmost end of the second row
+  lcd.print(brightnessLevel);  // Display the brightness level
+
+  brightnessDisplayStartTime = millis();  // Record the start time
+  brightnessDisplayed = true;  // Set flag to indicate brightness is being displayed
+}
+
+// Function to handle clearing brightness level display after 2 seconds
+void updateBrightnessDisplay() {
+  if (brightnessDisplayed && millis() - brightnessDisplayStartTime >= 2000) {
+    lcd.setCursor(13, 1);  // Set cursor to the same position
+    lcd.print("   ");  // Clear the characters by overwriting with spaces
+    brightnessDisplayed = false;  // Reset the flag
+  }
+}
+
+// Function to set fan speed
+void setFanSpeed(int speed) {
+  currentSpeed = speed;
+
+  // Ensure only one speed relay is turned on at a time
+  switch (speed) {
+    case 1: // Low speed
+      digitalWrite(relayPinLow, LOW);
+      digitalWrite(relayPinMedium, HIGH);
+      digitalWrite(relayPinHigh, HIGH);
+      setScrollMessage("Fan speed: Low");
+      break;
+    case 2: // Medium speed
+      digitalWrite(relayPinLow, HIGH);
+      digitalWrite(relayPinMedium, LOW);
+      digitalWrite(relayPinHigh, HIGH);
+      setScrollMessage("Fan speed: Medium");
+      break;
+    case 3: // High speed
+      digitalWrite(relayPinLow, HIGH);
+      digitalWrite(relayPinMedium, HIGH);
+      digitalWrite(relayPinHigh, LOW);
+      setScrollMessage("Fan speed: High");
+      break;
+    default: // Turn off all relays if speed is not recognized
+      digitalWrite(relayPinLow, HIGH);
+      digitalWrite(relayPinMedium, HIGH);
+      digitalWrite(relayPinHigh, HIGH);
+      setScrollMessage("Fan speed: Off");
+      break;
+  }
+
+  Serial.print("Fan speed set to: ");
+  Serial.println(speed == 1 ? "Low" : speed == 2 ? "Medium" : speed == 3 ? "High" : "Off");
+}
+
+// Function to stop the fan
+
+// Function to stop the fan
+void stopFan() {
+  if (fanRunning) {
+    // Turn off all speed relays
+    digitalWrite(relayPinLow, HIGH);   
+    digitalWrite(relayPinMedium, HIGH);
+    digitalWrite(relayPinHigh, HIGH);
+
+    // Reset the fan state
+    fanRunning = false;  // Indicate the fan is off
+    fanSchedule = 0;     // Reset the schedule
+
+    Serial.println("Fan turned off.");
+    setScrollMessage("Fan turned off.");
+    clearTimerDisplay();  // Clear the "Time Left" display on the LCD
+  }
+}
+
+// Function to schedule the fan for a specific number of hours
+void scheduleFan(int hours) {
+  // If the fan is not running, turn it on at the last used speed (or default to low speed)
+  if (!fanRunning) {
+    setFanSpeed(1);  // Start the fan at low speed (or use currentSpeed if you'd like to maintain the previous speed)
+    fanRunning = true;  // Mark the fan as running
+  }
+  
+  // Schedule the fan
+  fanSchedule = hours * 3600000UL; // Convert hours to milliseconds
+  fanStartTime = millis();         // Record the fan start time
+  lastUpdateTime = fanStartTime;   // Initialize last update time
+
+  // Display a message indicating the new schedule
+  char scheduleMessage[38];
+  snprintf(scheduleMessage, sizeof(scheduleMessage), "Fan scheduled for %d hour(s).", hours);
+  Serial.println(scheduleMessage);
+  setScrollMessage(scheduleMessage);
+}
+
+// Function to set the message to be scrolled on the LCD
+void setScrollMessage(const char* message) {
+  // Check if the message needs to be updated
+  if (strcmp(currentMessage, message) != 0) {
+    strncpy(currentMessage, message, maxMessageLength - 2);  // Copy the message
+    strcat(currentMessage, " ");  // Add a space at the end
+    scrollIndex = 0;
+  }
+}
+
+// Function to update the scroll
+void updateScroll(unsigned long currentTime) {
+  if (currentTime - lastScrollTime >= 300) { // Adjust scroll speed here
+    lcd.setCursor(0, 0);
+    lcd.print(currentMessage + scrollIndex); // Display a portion of the message
+
+    scrollIndex++;
+    if (scrollIndex >= strlen(currentMessage)) {
+      scrollIndex = 0; // Reset to start
+    }
+
+    lastScrollTime = currentTime;
+  }
+}
+// Function to display the timer on the second row in HH:MM:SS format
+void displayRemainingTime(unsigned long remainingTime) {
+  unsigned long remainingHours = remainingTime / 3600000UL;    // Calculate remaining hours
+  unsigned long remainingMinutes = (remainingTime % 3600000UL) / 60000UL;  // Calculate remaining minutes
+  unsigned long remainingSeconds = (remainingTime % 60000UL) / 1000UL;     // Calculate remaining seconds
+
+  // Display remaining time in hh:mm:ss format on Serial Monitor and LCD
+  String timeLeft = String(remainingHours) + ":" +
+                    (remainingMinutes < 10 ? "0" : "") + String(remainingMinutes) + ":" +
+                    (remainingSeconds < 10 ? "0" : "") + String(remainingSeconds);
+
+  Serial.print("Left: ");
+  Serial.println(timeLeft);
+  
+  lcd.setCursor(0, 1); // Set cursor to the second row
+  lcd.print("Left: ");
+  lcd.print(timeLeft);
+  lcd.print("   "); // Add extra spaces to clear any leftover characters
+}
+
+
+// Function to clear the timer display on the second row
+void clearTimerDisplay() {
+  lcd.setCursor(0, 1);  // Set cursor to the second row
+  lcd.print("                ");  // Clear the row by printing spaces
+}
